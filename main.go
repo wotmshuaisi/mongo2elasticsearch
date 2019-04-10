@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	elasticClient *elastic.Client
-	collection    *mongo.Collection
+	elasticIndex  *elastic.IndexService
+	mgocollection *mongo.Collection
 )
 
 func getClients(eStr, mStr, db, c string) {
@@ -45,6 +45,7 @@ func getClients(eStr, mStr, db, c string) {
 			}
 		}
 	}
+	elasticIndex = elasticClient.Index().Index(c)
 	/* mongodb client */
 	mgoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(mStr))
 	if err != nil {
@@ -53,7 +54,7 @@ func getClients(eStr, mStr, db, c string) {
 	if err := mgoClient.Ping(ctx, nil); err != nil {
 		panic(err)
 	}
-	collection = mgoClient.Database(db).Collection(c)
+	mgocollection = mgoClient.Database(db).Collection(c)
 }
 
 func main() {
@@ -72,11 +73,11 @@ func main() {
 	getClients(*estr, *mstr, *db, *c)
 	/* processing */
 	// get document count
-	count, err := collection.CountDocuments(context.Background(), bson.M{})
+	count, err := mgocollection.CountDocuments(context.Background(), bson.M{})
 	if err != nil {
 		logrus.WithError(err).Fatalln("mongo client count() error")
 	}
-	cursor, err := collection.Find(context.Background(), bson.M{})
+	cursor, err := mgocollection.Find(context.Background(), bson.M{})
 	if err != nil {
 		logrus.WithError(err).Fatalln("mongo client find() error")
 	}
@@ -89,7 +90,7 @@ func main() {
 		if err != nil {
 			logrus.WithError(err).Warnln("cursor decode error")
 		}
-		_ = itemBytes
+		elasticIndex.Type(*c).Id(id)
 		break
 	}
 
