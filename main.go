@@ -3,6 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"gopkg.in/cheggaaa/pb.v1"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -15,8 +22,11 @@ import (
 )
 
 var (
-	elasticIndex  *elastic.IndexService
-	mgocollection *mongo.Collection
+	elasticIndex       *elastic.IndexService
+	mgocollection      *mongo.Collection
+	idRegex, _         = regexp.Compile(`"_id":\{"\$oid":"(\w+)"\},`)
+	dateRegex, _       = regexp.Compile(`\{"\$date":"([\w\d\-\:]+)"\}`)
+	numberDateRegex, _ = regexp.Compile(`{"\$date":{"\$numberLong":"-?(\d{9})[\d]+"}}`)
 )
 
 func getClients(eStr, mStr, db, c string) {
@@ -59,16 +69,16 @@ func getClients(eStr, mStr, db, c string) {
 
 func main() {
 	/* variable definition */
-	// var dataList = make(chan bson., size)
+	var wg = sync.WaitGroup{}
 	/* program parameters */
 	var mstr = flag.String("mstr", "mongodb://localhost:27017", "mongodb connection string [mongodb://localhost:27017]")
 	var estr = flag.String("estr", "http://localhost:9200", "elasticsearch connection string [http://localhost:9200]")
 	var db = flag.String("db", "", "mongodb database[required]")
 	var c = flag.String("c", "", "mongodb database collection[required]")
 	flag.Parse()
-	// if db == nil || c == nil || *db == "" || *c == "" {
-	// 	logrus.Fatalln("database && collection could not be empty")
-	// }
+	if db == nil || c == nil || *db == "" || *c == "" {
+		logrus.Fatalln("database && collection could not be empty")
+	}
 	/* init clients */
 	getClients(*estr, *mstr, *db, *c)
 	/* processing */
@@ -81,22 +91,50 @@ func main() {
 	if err != nil {
 		logrus.WithError(err).Fatalln("mongo client find() error")
 	}
-
 	// progress bar
-	// bar := pb.StartNew(int(count))
+	bar := pb.StartNew(int(count))
 	_ = count
 	for cursor.Next(context.Background()) {
 		itemBytes, err := bson.MarshalExtJSON(cursor.Current, false, true)
 		if err != nil {
 			logrus.WithError(err).Warnln("cursor decode error")
 		}
-		elasticIndex.Type(*c).Id(id)
-		break
+		// regex processing [_id / datetime]
+		tmpStr := string(itemBytes)
+		idMatch := idRegex.FindStringSubmatch(tmpStr)
+		metadataDateTimeConvert(&tmpStr)
+		// insert into elasticsearch
+		wg.Add(1)
+		insertIntoElastic(&wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
 	}
+	wg.Wait()
+	bar.Finish()
+}
 
-	// for i := int64(0); i < count; i++ {
-	// 	bar.Increment()
-	// 	time.Sleep(time.Millisecond)
-	// }
-	// bar.FinishPrint("done.")
+func metadataDateTimeConvert(metadata *string) {
+	// for unix timestamp
+	if ok := numberDateRegex.MatchString(*metadata); ok {
+		for _, match := range numberDateRegex.FindAllStringSubmatch(*metadata, -1) {
+			tmpTime, _ := strconv.Atoi(match[1])
+			*metadata = strings.Replace(*metadata, match[0], "\""+time.Unix(int64(tmpTime), 0).Format(time.RFC3339)+"\"", 1)
+		}
+	}
+	// for isodate
+	if ok := dateRegex.MatchString(*metadata); ok {
+		*metadata = dateRegex.ReplaceAllString(*metadata, "\"$1\"")
+	}
+}
+
+func insertIntoElastic(wg *sync.WaitGroup, bar *pb.ProgressBar, id, metadata, index string) {
+	defer wg.Done()
+	defer bar.Increment()
+	res, err := elasticIndex.Index(index).Type(index).Id(id).BodyString(metadata).Refresh("true").Do(context.Background())
+	if err != nil {
+		logrus.WithError(err).Errorf("insert into elastic %#v\n", res)
+		return
+	}
+	if res.Result != "created" && res.Result != "updated" {
+		logrus.Warnf("insert into elastic failed - %#v", res)
+		return
+	}
 }
