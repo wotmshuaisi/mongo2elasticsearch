@@ -130,7 +130,7 @@ func insertIntoElastic(wg *sync.WaitGroup, bar *pb.ProgressBar, id, metadata, in
 	defer bar.Increment()
 	res, err := elasticIndex.Index(index).Type(index).Id(id).BodyString(metadata).Refresh("true").Do(context.Background())
 	if err != nil {
-		logrus.WithError(err).Errorf("insert into elastic %#v\n", res)
+		logrus.WithError(err).Errorf("insert into elastic ID=%s Response=%#v\n", id, res)
 		return
 	}
 	if res.Result != "created" && res.Result != "updated" {
