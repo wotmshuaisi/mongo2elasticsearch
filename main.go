@@ -81,6 +81,7 @@ func getClients(eStr, mStr, db, c string) {
 func main() {
 	/* variable definition */
 	var wg = sync.WaitGroup{}
+	var blockChannel = make(chan int, 199)
 	/* program parameters */
 	var mstr = flag.String("mstr", "mongodb://localhost:27017", "mongodb connection string [mongodb://localhost:27017]")
 	var estr = flag.String("estr", "http://localhost:9200", "elasticsearch connection string [http://localhost:9200]")
@@ -116,7 +117,8 @@ func main() {
 		metadataDateTimeConvert(&tmpStr)
 		// insert into elasticsearch
 		wg.Add(1)
-		go insertIntoElastic(&wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
+		blockChannel <- 0
+		go insertIntoElastic(&blockChannel, &wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
 	}
 	wg.Wait()
 	bar.Finish()
@@ -136,9 +138,12 @@ func metadataDateTimeConvert(metadata *string) {
 	}
 }
 
-func insertIntoElastic(wg *sync.WaitGroup, bar *pb.ProgressBar, id, metadata, index string) {
-	defer wg.Done()
-	defer bar.Increment()
+func insertIntoElastic(block *chan int, wg *sync.WaitGroup, bar *pb.ProgressBar, id, metadata, index string) {
+	defer func() {
+		wg.Done()
+		_ = <-(*block)
+		bar.Increment()
+	}()
 	res, err := elasticIndex.Index(index).Type(index).Id(id).BodyString(metadata).Refresh("true").Do(context.Background())
 	if err != nil {
 		logrus.WithError(err).Errorf("insert into elastic ID=%s Response=%#v\n", id, res)
