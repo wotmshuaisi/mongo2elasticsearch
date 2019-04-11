@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,6 +30,15 @@ var (
 	dateRegex, _       = regexp.Compile(`\{"\$date":"([\w\d\-\:]+)"\}`)
 	numberDateRegex, _ = regexp.Compile(`{"\$date":{"\$numberLong":"-?(\d{9})[\d]+"}}`)
 )
+
+func init() {
+	/* init logrus */
+	logfile, err := os.OpenFile("log.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	logrus.SetOutput(io.MultiWriter(logfile, os.Stdout))
+}
 
 func getClients(eStr, mStr, db, c string) {
 	/* elasticsearch client */
@@ -105,7 +116,7 @@ func main() {
 		metadataDateTimeConvert(&tmpStr)
 		// insert into elasticsearch
 		wg.Add(1)
-		insertIntoElastic(&wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
+		go insertIntoElastic(&wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
 	}
 	wg.Wait()
 	bar.Finish()
