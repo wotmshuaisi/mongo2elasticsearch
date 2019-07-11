@@ -16,3 +16,4 @@ package-lock.json
 
 mongo2elasticsearch
 *.log
+*.bak
