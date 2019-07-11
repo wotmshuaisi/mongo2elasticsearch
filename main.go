@@ -29,6 +29,9 @@ var (
 	idRegex, _         = regexp.Compile(`"_id":\{"\$oid":"(\w+)"\},`)
 	dateRegex, _       = regexp.Compile(`\{"\$date":"([\w\d\-\:]+)"\}`)
 	numberDateRegex, _ = regexp.Compile(`{"\$date":{"\$numberLong":"-?(\d{9})[\d]+"}}`)
+	metaDataPipe       = make(chan string, 200)
+	bar                *pb.ProgressBar
+	wg                 = sync.WaitGroup{}
 )
 
 func init() {
@@ -79,9 +82,6 @@ func getClients(eStr, mStr, db, c string) {
 }
 
 func main() {
-	/* variable definition */
-	var wg = sync.WaitGroup{}
-	var blockChannel = make(chan int, 199)
 	/* program parameters */
 	var mstr = flag.String("mstr", "mongodb://localhost:27017", "mongodb connection string [mongodb://localhost:27017]")
 	var estr = flag.String("estr", "http://localhost:9200", "elasticsearch connection string [http://localhost:9200]")
@@ -98,29 +98,37 @@ func main() {
 	count, err := mgocollection.CountDocuments(context.Background(), bson.M{})
 	if err != nil {
 		logrus.WithError(err).Fatalln("mongo client count() error")
+		return
 	}
 	cursor, err := mgocollection.Find(context.Background(), bson.M{})
 	if err != nil {
 		logrus.WithError(err).Fatalln("mongo client find() error")
+		return
 	}
 	// progress bar
-	bar := pb.StartNew(int(count))
-	_ = count
+	bar = pb.StartNew(int(count))
+	wg.Add(int(count))
+	go func() {
+		for m := range metaDataPipe {
+			idMatch := idRegex.FindStringSubmatch(m)
+			insertIntoElastic(idMatch[1], idRegex.ReplaceAllString(m, ""), *c)
+			wg.Done()
+		}
+	}()
+
 	for cursor.Next(context.Background()) {
 		itemBytes, err := bson.MarshalExtJSON(cursor.Current, false, true)
 		if err != nil {
 			logrus.WithError(err).Warnln("cursor decode error")
+			continue
 		}
 		// regex processing [_id / datetime]
 		tmpStr := string(itemBytes)
-		idMatch := idRegex.FindStringSubmatch(tmpStr)
 		metadataDateTimeConvert(&tmpStr)
-		// insert into elasticsearch
-		wg.Add(1)
-		blockChannel <- 0
-		go insertIntoElastic(&blockChannel, &wg, bar, idMatch[1], idRegex.ReplaceAllString(tmpStr, ""), *c)
+		metaDataPipe <- tmpStr
 	}
 	wg.Wait()
+	close(metaDataPipe)
 	bar.Finish()
 }
 
@@ -138,12 +146,8 @@ func metadataDateTimeConvert(metadata *string) {
 	}
 }
 
-func insertIntoElastic(block *chan int, wg *sync.WaitGroup, bar *pb.ProgressBar, id, metadata, index string) {
-	defer func() {
-		wg.Done()
-		_ = <-(*block)
-		bar.Increment()
-	}()
+func insertIntoElastic(id, metadata, index string) {
+	defer func() { bar.Increment() }()
 	res, err := elasticIndex.Index(index).Type(index).Id(id).BodyString(metadata).Refresh("true").Do(context.Background())
 	if err != nil {
 		logrus.WithError(err).Errorf("insert into elastic ID=%s Response=%#v\n", id, res)
@@ -151,6 +155,5 @@ func insertIntoElastic(block *chan int, wg *sync.WaitGroup, bar *pb.ProgressBar,
 	}
 	if res.Result != "created" && res.Result != "updated" {
 		logrus.Warnf("insert into elastic failed - %#v", res)
-		return
 	}
 }
